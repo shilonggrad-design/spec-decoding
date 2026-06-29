@@ -3,7 +3,7 @@
 **Public CUDA + ML Systems portfolio project for AI/ML Infra + HPC/Kernel job search.**
 **Direction**: Adaptive speculative decoding driven by grammar mask density for structured output generation.
 **Budget**: ~3-4 weeks @ 2 hr/day weekday + weekends = 30-50 hours total.
-**Owner**: Shilong Zhang. **Created**: 2026-06-26. **Supersedes**: v2 (grammar-guided drafting only).
+**Owner**: Shilong Zhang. **Created**: 2026-06-26. **Supersedes**: v3 (Qwen2.5 models).
 **Repo target**: `github.com/<your-handle>/grammar-sd`
 
 ---
@@ -171,8 +171,8 @@ Total estimated: ~12-14 working days at 2-3 hr/day = 3-4 weeks.
 
 ### Models + grammar
 
-- **Target**: `Qwen/Qwen2.5-1.5B-Instruct` (FP16, ~3GB)
-- **Draft**: `Qwen/Qwen2.5-0.5B-Instruct` (FP16, ~1GB)
+- **Target**: `Qwen/Qwen3.5-4B` (FP16, ~8GB)
+- **Draft**: `Qwen/Qwen3.5-0.8B` (FP16, ~1.6GB)
 - **Grammar library**: `xgrammar` (fast, vLLM-adjacent, produces token bitmasks)
 - **Schemas**: JSONSchemaBench subsets (simple Person schema → nested tool-call schema → complex nested objects)
 
@@ -280,6 +280,7 @@ No trained predictor needed. The grammar itself is the predictor.
 // Input: bitmask (uint64_t array, ceil(vocab_size/64) elements)
 // Output: float density = valid_tokens / vocab_size
 // Latency target: < 1μs (vocab=151K → 2361 uint64s → 1 warp in ~8 iterations)
+// NOTE: Qwen3.5 vocab size TBD at implementation time; adjust bitmask dimensions accordingly
 
 __global__ void popcount_density_kernel(
     const uint64_t* __restrict__ bitmask,
@@ -311,7 +312,7 @@ __global__ void popcount_density_kernel(
 **HPC talking points**:
 - `__popcll` is a single-instruction hardware intrinsic (not a loop)
 - Warp shuffle reduction (`__shfl_down_sync`) avoids shared memory round-trip
-- For vocab=151K: bitmask = 2361 × uint64 = ~19KB → fits in L2 cache
+- For vocab=151K (Qwen2.5 ref): bitmask = 2361 × uint64 = ~19KB → fits in L2 cache. Qwen3.5 vocab size TBD — update at implementation time.
 - One warp (32 threads) processes 2361 / 32 ≈ 74 elements/thread → ~74 iterations
 - Total: launch + compute + reduce < 1μs on any modern GPU
 - Memory coalescing: bitmask stored as contiguous uint64 array, consecutive threads access consecutive elements
@@ -420,7 +421,7 @@ __global__ void fused_mask_softmax_sample_kernel(
 
 **HPC talking points**:
 - **Kernel fusion** is the canonical GPU optimization pattern: reduce global memory traffic
-- For vocab=151K, logits array = 604KB (FP32) — reading it 3× (mask, softmax, sample) = 1.8MB. Fused = 604KB. 3× reduction in memory bandwidth.
+- For vocab=151K (Qwen2.5 ref), logits array = 604KB (FP32) — reading it 3× (mask, softmax, sample) = 1.8MB. Fused = 604KB. 3× reduction in memory bandwidth. Qwen3.5 dimensions TBD at implementation time.
 - Online softmax algorithm (Milakov & Gimelshein, 2018): single-pass numerically stable softmax using running max + sum
 - Temperature scaling fused into the first read — no extra pass
 - Curand device API for in-kernel RNG
@@ -480,7 +481,7 @@ grammar-sd/
 
 | Day | Hrs | Task | Deliverable |
 |---|---|---|---|
-| Mon | 2 | Cloud GPU setup, load Qwen2.5-1.5B + 0.5B, generate sample text | Both models respond |
+| Mon | 2 | Cloud GPU setup, load Qwen3.5-4B + 0.8B, generate sample text | Both models respond |
 | Tue | 2 | `baseline.py` vanilla AR; integrate xgrammar, emit valid JSON | Valid JSON, grammar works |
 | Wed | 2 | `speculator.py` free spec decoding (C1), Python only | Free spec streams tokens |
 | Thu | 2 | Add verify-only grammar mask (C2); observe acceptance drop | **The gap reproduced + measured** |
