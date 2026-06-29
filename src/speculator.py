@@ -10,7 +10,7 @@ Algorithm per round:
   1. Draft phase  — draft model autoregressively generates K tokens (greedy).
   2. Verify phase — target model single forward pass over [prefix + draft].
   3. Accept/reject (greedy) — compare argmax at each position.
-  4. If all K accepted → bonus token from position prompt_len + K.
+  4. If all K accepted → bonus token from logits at last position.
 """
 
 from __future__ import annotations
@@ -99,15 +99,6 @@ def draft_k_tokens(
     """Autoregressively generate up to K tokens with the draft model (greedy).
 
     Uses KV cache for efficiency.
-
-    Args:
-        draft_model: The draft (smaller) model.
-        input_ids: Current prefix tensor, shape (1, seq_len).
-        K: Maximum number of tokens to draft.
-        eos_token_id: Token ID for end-of-sequence.
-
-    Returns:
-        List of drafted token IDs (length 0..K).
     """
     draft_model_device = getattr(draft_model, "device", "cpu")
     drafted: list[int] = []
@@ -155,15 +146,8 @@ def speculative_decode(
         max_tokens: Maximum tokens to generate (excluding prompt).
 
     Returns:
-        dict with keys:
-            token_ids (list[int]),
-            text (str),
-            accepted_count (int),
-            drafted_count (int),
-            acceptance_rate (float),
-            time_sec (float),
-            density_trace (list[float], C2 only),
-            rounds (int)
+        dict with keys: token_ids, text, accepted_count, drafted_count,
+        acceptance_rate, time_sec, density_trace (C2 only), rounds
     """
     assert config in ("C1", "C2"), f"Invalid config: {config}"
     if config == "C2":
@@ -188,20 +172,21 @@ def speculative_decode(
 
     with torch.inference_mode():
         while len(generated) < max_tokens:
-            # Current full prefix
+            prompt_len = len(prompt_tokens)
+            prefix_len = prompt_len + len(generated)
+
+            # ---- 1. Draft phase ----
             prefix = torch.tensor(
                 [prompt_tokens + generated], dtype=torch.long, device=target_device
             )
-            prompt_len = len(prompt_tokens)
-
-            # ---- 1. Draft phase ----
             draft_tokens = draft_k_tokens(draft_model, prefix, K, eos_token_id)
             if not draft_tokens:
                 break  # Draft produced EOS immediately
-            total_drafted += len(draft_tokens)
+            n_draft = len(draft_tokens)
+            total_drafted += n_draft
 
             # ---- 2. Verify phase ----
-            # Full forward pass over [prefix + draft_tokens] — no KV cache for target (Week 1 simplicity)
+            # Full forward pass: input = [prompt + generated + draft_tokens]
             verify_input = torch.tensor(
                 [prompt_tokens + generated + draft_tokens],
                 dtype=torch.long,
@@ -209,25 +194,20 @@ def speculative_decode(
             )
             verify_outputs = target_model(verify_input)
             verify_logits = verify_outputs.logits[0]  # (seq_len, vocab_size)
-
-            # Debug: log shapes
-            if rounds == 0:
-                print(f"[DEBUG] verify_input len={verify_input.shape[1]}, logits shape={verify_logits.shape[0]}")
-                print(f"[DEBUG] prompt_len={prompt_len}, len(generated)={len(generated)}, n_draft={n_draft}")
+            # verify_logits has same length as verify_input
+            # logits[i] predicts token at position i+1
+            # So logits[prefix_len - 1] predicts the first draft token
+            # logits[prefix_len - 1 + i] predicts draft_token[i]
 
             # ---- 3. Accept / Reject (greedy) ----
             accepted_this_round = 0
-            n_draft = len(draft_tokens)
+            rejected = False
 
             for i in range(n_draft):
-                # logits[pos] predicts token at pos+1
-                # prefix = prompt_tokens + generated (length = prompt_len + len(generated))
-                # logits at prefix_end - 1 predicts first draft token
-                pos = prompt_len + len(generated) - 1 + i
+                pos = prefix_len - 1 + i  # logits index for predicting draft_token[i]
                 if pos >= verify_logits.shape[0]:
-                    # Out of bounds — skip remaining draft tokens
-                    break
-                position_logits = verify_logits[pos]  # (vocab_size,)
+                    break  # safety bound
+                position_logits = verify_logits[pos].clone()  # (vocab_size,)
 
                 # Apply grammar mask for C2 before argmax
                 if config == "C2" and matcher is not None and bitmask is not None:
@@ -254,7 +234,6 @@ def speculative_decode(
                     if config == "C2" and matcher is not None:
                         accepted = matcher.accept_token(draft_tokens[i])
                         if not accepted:
-                            # Grammar mismatch — accept anyway (mask should prevent this)
                             print(f"[WARN] Grammar rejected accepted token {draft_tokens[i]}")
                         if matcher.is_terminated():
                             break
@@ -263,12 +242,13 @@ def speculative_decode(
                     generated.append(target_predicted)
                     if config == "C2" and matcher is not None:
                         matcher.accept_token(target_predicted)
+                    rejected = True
                     break
 
-            # If all K accepted AND not terminated, grab bonus token
-            if accepted_this_round == n_draft:
-                # logits at last position of [prefix + draft] predicts next token
-                bonus_pos = prompt_len + len(generated) + n_draft - 1
+            # ---- 4. Bonus token (if all K accepted and not terminated) ----
+            if accepted_this_round == n_draft and not rejected:
+                # All draft tokens accepted. The last logits position predicts the next token.
+                bonus_pos = prefix_len + n_draft - 1  # = len(verify_input) - 1
                 if bonus_pos < verify_logits.shape[0]:
                     bonus_logits = verify_logits[bonus_pos].clone()
 
@@ -297,7 +277,6 @@ def speculative_decode(
             rounds += 1
 
             if eos_token_id in generated:
-                # Trim at EOS
                 eos_idx = generated.index(eos_token_id)
                 generated = generated[:eos_idx]
                 break
