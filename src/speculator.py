@@ -210,6 +210,11 @@ def speculative_decode(
             verify_outputs = target_model(verify_input)
             verify_logits = verify_outputs.logits[0]  # (seq_len, vocab_size)
 
+            # Debug: log shapes
+            if rounds == 0:
+                print(f"[DEBUG] verify_input len={verify_input.shape[1]}, logits shape={verify_logits.shape[0]}")
+                print(f"[DEBUG] prompt_len={prompt_len}, len(generated)={len(generated)}, n_draft={n_draft}")
+
             # ---- 3. Accept / Reject (greedy) ----
             accepted_this_round = 0
             n_draft = len(draft_tokens)
@@ -219,6 +224,9 @@ def speculative_decode(
                 # prefix = prompt_tokens + generated (length = prompt_len + len(generated))
                 # logits at prefix_end - 1 predicts first draft token
                 pos = prompt_len + len(generated) - 1 + i
+                if pos >= verify_logits.shape[0]:
+                    # Out of bounds — skip remaining draft tokens
+                    break
                 position_logits = verify_logits[pos]  # (vocab_size,)
 
                 # Apply grammar mask for C2 before argmax
