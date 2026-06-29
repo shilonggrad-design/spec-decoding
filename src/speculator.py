@@ -183,7 +183,8 @@ def speculative_decode(
             if not draft_tokens:
                 break  # Draft produced EOS immediately
             n_draft = len(draft_tokens)
-            total_drafted += n_draft
+            # total_drafted updated after verification (C2 early-term fairness)
+            # For C1, all drafted tokens will be verified, so defer is safe.
 
             # ---- 2. Verify phase ----
             # Full forward pass: input = [prompt + generated + draft_tokens]
@@ -202,11 +203,13 @@ def speculative_decode(
             # ---- 3. Accept / Reject (greedy) ----
             accepted_this_round = 0
             rejected = False
+            verified_this_round = 0  # only count tokens actually verified
 
             for i in range(n_draft):
                 pos = prefix_len - 1 + i  # logits index for predicting draft_token[i]
                 if pos >= verify_logits.shape[0]:
                     break  # safety bound
+                verified_this_round += 1
                 position_logits = verify_logits[pos].clone()  # (vocab_size,)
 
                 # Apply grammar mask for C2 before argmax
@@ -246,6 +249,8 @@ def speculative_decode(
                     break
 
             # ---- 4. Bonus token (if all K accepted and not terminated) ----
+            total_drafted += verified_this_round  # only tokens actually checked
+
             if accepted_this_round == n_draft and not rejected:
                 # All draft tokens accepted. The last logits position predicts the next token.
                 bonus_pos = prefix_len + n_draft - 1  # = len(verify_input) - 1
