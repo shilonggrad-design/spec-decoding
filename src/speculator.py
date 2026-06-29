@@ -215,7 +215,10 @@ def speculative_decode(
             n_draft = len(draft_tokens)
 
             for i in range(n_draft):
-                pos = prompt_len + len(generated) + i
+                # logits[pos] predicts token at pos+1
+                # prefix = prompt_tokens + generated (length = prompt_len + len(generated))
+                # logits at prefix_end - 1 predicts first draft token
+                pos = prompt_len + len(generated) - 1 + i
                 position_logits = verify_logits[pos]  # (vocab_size,)
 
                 # Apply grammar mask for C2 before argmax
@@ -256,7 +259,8 @@ def speculative_decode(
 
             # If all K accepted AND not terminated, grab bonus token
             if accepted_this_round == n_draft:
-                bonus_pos = prompt_len + len(generated)
+                # logits at last position of [prefix + draft] predicts next token
+                bonus_pos = prompt_len + len(generated) + n_draft - 1
                 if bonus_pos < verify_logits.shape[0]:
                     bonus_logits = verify_logits[bonus_pos].clone()
 
