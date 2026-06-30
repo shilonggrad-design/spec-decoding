@@ -31,19 +31,30 @@ Measure the gap between free speculative decoding (C1) and grammar-constrained s
 ## Results
 
 ### C1 — Free Speculative Decoding (baseline)
-- **Accept rate:** 48.66% (consistent across all schemas)
+- **Accept rate:** 77.02% (consistent across all schemas)
 - **Throughput:** ~6.1 tok/s (A100, warm)
 - **Output length:** 256–261 tokens (max_tokens=256)
-- Grammar has zero effect — confirm C1 ignores schema parameter correctly.
+- Grammar has zero effect — confirms C1 ignores schema parameter correctly.
 
 ### C2 — Verify-Only Grammar
 | Schema | Avg Accept | Avg Output Len | Avg Time |
 |--------|-----------|----------------|----------|
-| simple | 37.93% | **25 tok** | ~6.2s |
-| tool_call | 20.74% | **30 tok** | ~8.3s |
-| nested | 48.17% | **179 tok** | ~32.8s |
+| simple | 72.54% | **25 tok** | ~6.2s |
+| tool_call | 51.58% | **30 tok** | ~8.3s |
+| nested | 77.64% | **179 tok** | ~32.8s |
 
-**Key insight:** C2 terminates early when grammar determines JSON is complete. Simple 4-field JSON finishes in ~25 tokens — this is a feature, not a bug. Time-to-completion is the right metric, not throughput.
+### The Gap (C1 → C2)
+| Schema | C1 Accept | C2 Accept | Gap |
+|--------|-----------|-----------|-----|
+| nested | 77.02% | 77.64% | -0.62% (negligible) |
+| simple | 77.02% | 72.54% | 4.48% |
+| tool_call | 77.02% | 51.58% | **25.44%** |
+
+**Key insights:**
+1. C2 terminates early when grammar determines JSON is complete. Simple 4-field JSON finishes in ~25 tokens — this is a feature, not a bug.
+2. tool_call schema shows a **25.4 percentage point gap** — draft generates unconstrained tokens that violate enum/function-name constraints, target grammar mask rejects them.
+3. nested schema has negligible gap — long output with free-form string values where grammar is loose.
+4. This gap motivates C3 (grammar mask on draft too).
 
 ### C2 Density Trace (simple schema, excerpt)
 ```
@@ -63,6 +74,7 @@ This extreme variance is the motivation for C4 adaptive K.
 1. **Off-by-one in logits indexing** — `logits[pos]` predicts `token[pos+1]` (causal LM property). Fixed to `prefix_len - 1 + i`.
 2. **In-place mutation** — `apply_token_bitmask_inplace` polluted subsequent positions. Fixed with `.clone()`.
 3. **File corruption from repeated patches** — Rewrote speculator.py from scratch.
+4. **Accept rate accounting** — `total_drafted` incremented before verification, so tokens never checked (due to reject-break or grammar early-termination) counted as "rejected". Fixed to only count verified tokens. C1: 48.66% → 77.02%, C2 tool_call: 20.74% → 51.58%.
 
 ## Deliverables
 
