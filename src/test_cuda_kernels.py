@@ -169,6 +169,96 @@ def test_fused_sample_greedy():
         print(f"  ⚠️  Kernel 3 skipped (no CUDA), Python={py_result}")
 
 
+def test_argmax_batch():
+    """Kernel 2: grammar_masked_argmax for K+1=6 positions simultaneously.
+
+    This is the real verify-path scenario: the target model produces logits
+    for [prefix + K draft tokens] = K+1 positions, each with its own grammar
+    bitmask. The kernel launches one block per position.
+    """
+    K_plus_1 = 6  # 5 draft tokens + 1 bonus
+
+    # Each position has different valid tokens
+    all_valid = [
+        [100, 200, 300],       # position 0: token 300 has highest logit
+        [10, 20, 30],          # position 1: token 30 has highest
+        [0, 1, 2],             # position 2: token 2 has highest
+        [500, 501, 502, 503],  # position 3: token 503 has highest
+        [999, 1000, 1001],     # position 4: token 1001 has highest
+        [777, 888],            # position 5: token 888 has highest
+    ]
+
+    # Build logits: random noise + peak at the correct token for each position
+    logits_batch = torch.randn(K_plus_1, VOCAB_SIZE) * 0.1
+    expected = []
+    for pos, valid_indices in enumerate(all_valid):
+        # Make the last valid token have a very high logit
+        peak_token = valid_indices[-1]
+        logits_batch[pos, peak_token] = 42.0 + pos
+        # But set a higher invalid logit to ensure masking works
+        logits_batch[pos, 0] = 999.0  # invalid (not in bitmask)
+        expected.append(peak_token)
+
+    # Build batched bitmask [K+1, num_words]
+    bitmask_batch = torch.zeros(K_plus_1, NUM_WORDS, dtype=torch.int32)
+    for pos, valid_indices in enumerate(all_valid):
+        row = make_bitmask(valid_indices)
+        bitmask_batch[pos] = row
+
+    if is_cuda_available() and torch.cuda.is_available():
+        cu_result = grammar_masked_argmax(
+            logits_batch.cuda(), bitmask_batch.cuda(),
+            VOCAB_SIZE, NUM_WORDS,
+        )
+        # cu_result is a tensor of shape [K+1]
+        cu_indices = cu_result.cpu().tolist()
+        for pos in range(K_plus_1):
+            assert cu_indices[pos] == expected[pos], \
+                f"Position {pos} mismatch: CUDA={cu_indices[pos]}, expected={expected[pos]}"
+        print(f"  ✅ Kernel 2 (batch K+1={K_plus_1}): all positions match")
+    else:
+        print(f"  ⚠️  Kernel 2 batch skipped (no CUDA)")
+        for pos in range(K_plus_1):
+            py_result = python_masked_argmax(logits_batch[pos], bitmask_batch[pos], VOCAB_SIZE)
+            assert py_result == expected[pos], f"Python pos {pos} mismatch"
+        print(f"  ✅ Kernel 2 (batch, Python fallback): all positions match")
+
+
+def test_fused_sample_sampling():
+    """Kernel 3: fused_sample with temperature > 0 returns a valid token.
+
+    Unlike greedy (temperature=0), sampling mode uses softmax + CDF.
+    We can't predict the exact token, but we can verify it's in the valid set.
+    """
+    logits = torch.randn(VOCAB_SIZE) * 2.0  # more spread for sampling
+
+    valid_indices = [42, 100, 200, 300, 400, 500, 600, 700, 800, 900]
+    bitmask = make_bitmask(valid_indices)
+    valid_set = set(valid_indices)
+
+    if is_cuda_available() and torch.cuda.is_available():
+        # Run multiple times with different seeds
+        sampled_tokens = set()
+        for seed in range(10):
+            token = fused_sample(
+                logits.cuda(), bitmask.cuda(),
+                VOCAB_SIZE, NUM_WORDS,
+                temperature=1.0, seed=seed,
+            )
+            assert token in valid_set, \
+                f"Sampled token {token} not in valid set {valid_set}"
+            sampled_tokens.add(token)
+
+        # With 10 seeds and 10 valid tokens with different probabilities,
+        # we should see at least 2 different tokens (confirms it's sampling, not argmax)
+        assert len(sampled_tokens) >= 2, \
+            f"Expected sampling diversity, got same token {sampled_tokens} every time"
+        print(f"  ✅ Kernel 3 (sampling temp=1.0): {len(sampled_tokens)} unique tokens "
+              f"across 10 seeds, all valid")
+    else:
+        print(f"  ⚠️  Kernel 3 sampling skipped (no CUDA)")
+
+
 def test_cuda_speedup():
     """Measure speedup of CUDA popcount vs Python loop."""
     valid_indices = list(range(1240))  # ~0.5% density
@@ -213,8 +303,10 @@ def main():
     tests = [
         ("Kernel 1: popcount (basic)", test_popcount_basic),
         ("Kernel 1: popcount (sparse)", test_popcount_sparse),
-        ("Kernel 2: grammar_masked_argmax", test_argmax_basic),
+        ("Kernel 2: grammar_masked_argmax (single)", test_argmax_basic),
+        ("Kernel 2: grammar_masked_argmax (batch K+1)", test_argmax_batch),
         ("Kernel 3: fused_sample (greedy)", test_fused_sample_greedy),
+        ("Kernel 3: fused_sample (sampling temp=1.0)", test_fused_sample_sampling),
         ("Performance: popcount speedup", test_cuda_speedup),
     ]
 
