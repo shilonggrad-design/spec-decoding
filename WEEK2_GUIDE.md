@@ -61,10 +61,10 @@ for cfg in ("C1", "C2", "C3"):
     print(f"  Output: {result['text'][:200]}")
 ```
 
-**Expected:**
-- C1: ~89% accept (baseline, no grammar)
-- C2: ~62% accept (the gap — draft unconstrained, target rejects)
-- C3: **~100% accept** (draft now generates grammar-valid tokens)
+**Expected (based on Week 1 post-fix benchmark, [data截至 2026-06-29]):**
+- C1: **~77%** accept (baseline, no grammar)
+- C2 (tool_call): **~52%** accept (the gap — draft unconstrained, target rejects)
+- C3: **~100%** accept (draft now generates grammar-valid tokens) ✅ confirmed
 
 ---
 
@@ -161,10 +161,12 @@ Expected output:
 ```
 ✅ Kernel 1 (popcount): CUDA=48 == Python=48
 ✅ Kernel 1 (sparse): CUDA=3 == Python=3
-✅ Kernel 2 (argmax): CUDA=100 == Python=100
+✅ Kernel 2 (single): CUDA=100 == Python=100
+✅ Kernel 2 (batch K+1=6): all positions match
 ✅ Kernel 3 (greedy): CUDA=50 == Python=50
+✅ Kernel 3 (sampling temp=1.0): N unique tokens across 10 seeds, all valid
 ⚡ Popcount speedup: Python=X.Xms → CUDA=0.0XXms (N×)
-Results: 5 passed, 0 failed
+Results: 7 passed, 0 failed
 ```
 
 ### Step 3: Measure kernel speedup
@@ -283,5 +285,5 @@ spec-decoding/
 - [ ] C4 works, k_trace shows density-driven K changes
 - [ ] C4 throughput ≥ C3 throughput
 - [ ] CUDA extension builds successfully
-- [ ] All 5 kernel validation tests pass
+- [ ] All 7 kernel validation tests pass
 - [ ] Tagged `v0.2-cuda-adaptive`

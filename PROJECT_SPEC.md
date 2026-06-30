@@ -277,22 +277,24 @@ No trained predictor needed. The grammar itself is the predictor.
 **Purpose**: Count set bits in grammar bitmask → compute density ratio.
 
 ```cuda
-// Input: bitmask (uint64_t array, ceil(vocab_size/64) elements)
+// Input: bitmask (int32_t array, ceil(vocab_size/32) elements)
 // Output: float density = valid_tokens / vocab_size
-// Latency target: < 1μs (vocab=151K → 2361 uint64s → 1 warp in ~8 iterations)
-// NOTE: Qwen3.5 vocab_size = 248320 (confirmed 2026-06-29). bitmask = ceil(248320/32) = 7761 × int32 ≈ 31KB
+// Latency target: < 1μs (vocab=248320 → 7761 int32s → 256 threads in ~31 iterations)
+// NOTE: xgrammar allocates bitmask as int32 (not int64). __popc = 32-bit popcount intrinsic.
+// bitmask = ceil(248320/32) = 7761 × int32 ≈ 31KB → fits L2 cache
 
 __global__ void popcount_density_kernel(
-    const uint64_t* __restrict__ bitmask,
+    const int32_t* __restrict__ bitmask,
     int* total_count,
-    int num_u64
+    int num_words
 ) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int local_count = 0;
 
     // Grid-stride loop with thread coarsening
-    for (int i = tid; i < num_u64; i += gridDim.x * blockDim.x) {
-        local_count += __popcll(bitmask[i]);  // Hardware popcount intrinsic
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < num_words;
+         i += gridDim.x * blockDim.x) {
+        local_count += __popc(bitmask[i]);  // 32-bit hardware popcount: 1 instruction
     }
 
     // Warp-level reduction via shuffle
