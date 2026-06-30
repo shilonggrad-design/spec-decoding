@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-speculator.py — Days 3–4: Speculative decoding with two configurations.
+speculator.py — Speculative decoding with three configurations.
 
-C1 (free spec):  No grammar anywhere. Draft and verify freely.
-C2 (verify-only): Grammar bitmask applied only during target verification.
-                   Draft is unconstrained.
+C1 (free spec):     No grammar anywhere. Draft and verify freely.
+C2 (verify-only):   Grammar bitmask applied only during target verification.
+                    Draft is unconstrained.
+C3 (grammar-guided): Grammar bitmask on BOTH draft and target. Draft generates
+                     grammar-valid tokens, target verifies. After draft, matcher
+                     rolls back to pre-draft state so verify phase reconstructs
+                     correct grammar path from actual accepted tokens.
 
 Algorithm per round:
   1. Draft phase  — draft model autoregressively generates K tokens (greedy).
+                    C3: grammar mask applied per token, matcher advances, then rollback.
   2. Verify phase — target model single forward pass over [prefix + draft].
+                    C2/C3: grammar mask applied on target logits per position.
   3. Accept/reject (greedy) — compare argmax at each position.
   4. If all K accepted → bonus token from logits at last position.
 """
@@ -29,7 +35,7 @@ import xgrammar as xgr
 TARGET_MODEL_ID = "Qwen/Qwen3.5-4B"
 DRAFT_MODEL_ID = "Qwen/Qwen3.5-0.8B"
 
-Config = Literal["C1", "C2"]
+Config = Literal["C1", "C2", "C3"]
 
 
 def load_models(device: str = "auto") -> tuple[AutoModelForCausalLM, AutoModelForCausalLM, AutoTokenizer]:
@@ -95,8 +101,14 @@ def draft_k_tokens(
     input_ids: torch.Tensor,
     K: int,
     eos_token_id: int | None,
+    matcher: xgr.GrammarMatcher | None = None,
+    bitmask: torch.Tensor | None = None,
+    vocab_size: int | None = None,
 ) -> list[int]:
     """Autoregressively generate up to K tokens with the draft model (greedy).
+
+    If matcher is provided (C3), applies grammar mask before argmax and
+    advances grammar state per token. Caller must rollback() after verification.
 
     Uses KV cache for efficiency.
     """
@@ -108,7 +120,17 @@ def draft_k_tokens(
     with torch.inference_mode():
         for _ in range(K):
             outputs = draft_model(current, past_key_values=past_key_values, use_cache=True)
-            next_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+            next_logits = outputs.logits[:, -1, :].clone()
+
+            if matcher is not None and bitmask is not None:
+                # C3: grammar-guided draft
+                need_apply = matcher.fill_next_token_bitmask(bitmask)
+                if need_apply:
+                    xgr.apply_token_bitmask_inplace(
+                        next_logits, bitmask.to(draft_model_device)
+                    )
+
+            next_id = next_logits.argmax(dim=-1).item()
 
             if next_id == eos_token_id:
                 break
@@ -116,6 +138,11 @@ def draft_k_tokens(
             drafted.append(next_id)
             current = torch.tensor([[next_id]], device=draft_model_device)
             past_key_values = outputs.past_key_values
+
+            if matcher is not None:
+                matcher.accept_token(next_id)
+                if matcher.is_terminated():
+                    break
 
     return drafted
 
@@ -141,26 +168,26 @@ def speculative_decode(
         tokenizer: Shared HuggingFace tokenizer.
         prompt_tokens: Tokenized prompt (list of ints).
         K: Speculation width — number of tokens to draft per round.
-        config: "C1" (free spec) or "C2" (verify-only grammar).
-        schema_str: JSON schema string (required for C2).
+        config: "C1" (free spec), "C2" (verify-only grammar), or "C3" (grammar-guided draft + verify).
+        schema_str: JSON schema string (required for C2 and C3).
         max_tokens: Maximum tokens to generate (excluding prompt).
 
     Returns:
         dict with keys: token_ids, text, accepted_count, drafted_count,
-        acceptance_rate, time_sec, density_trace (C2 only), rounds
+        acceptance_rate, time_sec, density_trace (C2/C3 only), rounds
     """
-    assert config in ("C1", "C2"), f"Invalid config: {config}"
-    if config == "C2":
-        assert schema_str is not None, "C2 requires a schema_str"
+    assert config in ("C1", "C2", "C3"), f"Invalid config: {config}"
+    if config in ("C2", "C3"):
+        assert schema_str is not None, f"{config} requires a schema_str"
 
     vocab_size = target_model.config.vocab_size
     target_device = getattr(target_model, "device", "cpu")
     eos_token_id = tokenizer.eos_token_id
 
-    # Build grammar pipeline for C2
+    # Build grammar pipeline for C2/C3
     matcher: xgr.GrammarMatcher | None = None
     bitmask: torch.Tensor | None = None
-    if config == "C2":
+    if config in ("C2", "C3"):
         matcher, bitmask = build_grammar_pipeline(tokenizer, vocab_size, schema_str)
 
     generated: list[int] = []
@@ -179,7 +206,16 @@ def speculative_decode(
             prefix = torch.tensor(
                 [prompt_tokens + generated], dtype=torch.long, device=target_device
             )
-            draft_tokens = draft_k_tokens(draft_model, prefix, K, eos_token_id)
+            if config == "C3" and matcher is not None and bitmask is not None:
+                draft_tokens = draft_k_tokens(
+                    draft_model, prefix, K, eos_token_id,
+                    matcher=matcher, bitmask=bitmask, vocab_size=vocab_size,
+                )
+                # Rollback matcher to pre-draft state for verify phase
+                if len(draft_tokens) > 0:
+                    matcher.rollback(len(draft_tokens))
+            else:
+                draft_tokens = draft_k_tokens(draft_model, prefix, K, eos_token_id)
             if not draft_tokens:
                 break  # Draft produced EOS immediately
             n_draft = len(draft_tokens)
@@ -212,8 +248,8 @@ def speculative_decode(
                 verified_this_round += 1
                 position_logits = verify_logits[pos].clone()  # (vocab_size,)
 
-                # Apply grammar mask for C2 before argmax
-                if config == "C2" and matcher is not None and bitmask is not None:
+                # Apply grammar mask for C2/C3 before argmax
+                if config in ("C2", "C3") and matcher is not None and bitmask is not None:
                     need_apply = matcher.fill_next_token_bitmask(bitmask)
                     if need_apply:
                         xgr.apply_token_bitmask_inplace(
@@ -234,7 +270,7 @@ def speculative_decode(
                     total_accepted += 1
 
                     # Tell grammar matcher about accepted token
-                    if config == "C2" and matcher is not None:
+                    if config in ("C2", "C3") and matcher is not None:
                         accepted = matcher.accept_token(draft_tokens[i])
                         if not accepted:
                             print(f"[WARN] Grammar rejected accepted token {draft_tokens[i]}")
@@ -243,7 +279,7 @@ def speculative_decode(
                 else:
                     # Reject — take target's correction
                     generated.append(target_predicted)
-                    if config == "C2" and matcher is not None:
+                    if config in ("C2", "C3") and matcher is not None:
                         matcher.accept_token(target_predicted)
                     rejected = True
                     break
@@ -257,7 +293,7 @@ def speculative_decode(
                 if bonus_pos < verify_logits.shape[0]:
                     bonus_logits = verify_logits[bonus_pos].clone()
 
-                    if config == "C2" and matcher is not None and bitmask is not None:
+                    if config in ("C2", "C3") and matcher is not None and bitmask is not None:
                         need_apply = matcher.fill_next_token_bitmask(bitmask)
                         if need_apply:
                             xgr.apply_token_bitmask_inplace(
@@ -274,7 +310,7 @@ def speculative_decode(
                         break
 
                     generated.append(bonus_token)
-                    if config == "C2" and matcher is not None:
+                    if config in ("C2", "C3") and matcher is not None:
                         matcher.accept_token(bonus_token)
                         if matcher.is_terminated():
                             break
@@ -312,58 +348,47 @@ def main() -> None:
     import os
 
     print("=" * 60)
-    print("Week 1 — Days 3–4: Speculative Decoding (C1 + C2)")
+    print("Speculative Decoding: C1 (free) + C2 (verify-only) + C3 (grammar-guided)")
     print("=" * 60)
 
     target_model, draft_model, tokenizer = load_models()
     print(f"[OK] Loaded {TARGET_MODEL_ID} + {DRAFT_MODEL_ID}")
 
     # Load schema
-    schema_path = os.path.join(os.path.dirname(__file__), "..", "schemas", "schema_simple.json")
+    schema_path = os.path.join(os.path.dirname(__file__), "..", "schemas", "schema_tool_call.json")
     with open(schema_path) as f:
         schema_str = f.read()
 
-    prompt = "Generate a person's information in JSON format."
+    prompt = "Call a function to search for AI news."
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
 
     print(f"\nPrompt: {prompt}")
+    print(f"Schema: tool_call")
     print(f"Prompt tokens: {len(prompt_tokens)}")
 
-    # --- C1: Free speculative decoding ---
-    print("\n--- C1: Free Speculative Decoding ---")
-    c1_result = speculative_decode(
-        target_model, draft_model, tokenizer, prompt_tokens,
-        K=5, config="C1", max_tokens=256,
-    )
-    print(f"Tokens generated: {len(c1_result['token_ids'])}")
-    print(f"Acceptance rate:  {c1_result['acceptance_rate']:.2%} "
-          f"({c1_result['accepted_count']}/{c1_result['drafted_count']})")
-    print(f"Time: {c1_result['time_sec']:.3f}s ({len(c1_result['token_ids']) / max(c1_result['time_sec'], 0.001):.1f} tok/s)")
-    print(f"Output: {c1_result['text'][:300]}...")
-
-    # --- C2: Verify-only grammar ---
-    print("\n--- C2: Verify-Only Grammar Speculative Decoding ---")
-    c2_result = speculative_decode(
-        target_model, draft_model, tokenizer, prompt_tokens,
-        K=5, config="C2", schema_str=schema_str, max_tokens=256,
-    )
-    print(f"Tokens generated: {len(c2_result['token_ids'])}")
-    print(f"Acceptance rate:  {c2_result['acceptance_rate']:.2%} "
-          f"({c2_result['accepted_count']}/{c2_result['drafted_count']})")
-    print(f"Time: {c2_result['time_sec']:.3f}s ({len(c2_result['token_ids']) / max(c2_result['time_sec'], 0.001):.1f} tok/s)")
-    print(f"Output: {c2_result['text'][:300]}...")
-
-    if "density_trace" in c2_result and c2_result["density_trace"]:
-        avg_d = sum(c2_result["density_trace"]) / len(c2_result["density_trace"])
-        print(f"Avg mask density: {avg_d:.4f} ({avg_d * 100:.1f}% of vocab)")
+    results = {}
+    for cfg in ("C1", "C2", "C3"):
+        print(f"\n--- {cfg} ---")
+        result = speculative_decode(
+            target_model, draft_model, tokenizer, prompt_tokens,
+            K=5, config=cfg,
+            schema_str=schema_str if cfg != "C1" else None,
+            max_tokens=256,
+        )
+        results[cfg] = result
+        print(f"Tokens generated: {len(result['token_ids'])}")
+        print(f"Acceptance rate:  {result['acceptance_rate']:.2%} "
+              f"({result['accepted_count']}/{result['drafted_count']})")
+        print(f"Time: {result['time_sec']:.3f}s ({len(result['token_ids']) / max(result['time_sec'], 0.001):.1f} tok/s)")
+        print(f"Output: {result['text'][:300]}...")
 
     # --- Comparison ---
     print("\n--- Comparison ---")
-    print(f"{'Metric':<20} {'C1':>12} {'C2':>12}")
-    print("-" * 44)
-    print(f"{'Tokens':<20} {len(c1_result['token_ids']):>12} {len(c2_result['token_ids']):>12}")
-    print(f"{'Time (s)':<20} {c1_result['time_sec']:>12.3f} {c2_result['time_sec']:>12.3f}")
-    print(f"{'Accept rate':<20} {c1_result['acceptance_rate']:>12.2%} {c2_result['acceptance_rate']:>12.2%}")
+    print(f"{'Metric':<20} {'C1':>12} {'C2':>12} {'C3':>12}")
+    print("-" * 56)
+    print(f"{'Tokens':<20} {len(results['C1']['token_ids']):>12} {len(results['C2']['token_ids']):>12} {len(results['C3']['token_ids']):>12}")
+    print(f"{'Time (s)':<20} {results['C1']['time_sec']:>12.3f} {results['C2']['time_sec']:>12.3f} {results['C3']['time_sec']:>12.3f}")
+    print(f"{'Accept rate':<20} {results['C1']['acceptance_rate']:>12.2%} {results['C2']['acceptance_rate']:>12.2%} {results['C3']['acceptance_rate']:>12.2%}")
 
 
 if __name__ == "__main__":
