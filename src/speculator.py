@@ -25,6 +25,7 @@ Algorithm per round:
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Literal
 
@@ -216,10 +217,22 @@ def speculative_decode(
             # C4: compute adaptive K from current position density
             current_K = K  # default fixed K
             if config == "C4" and matcher is not None and bitmask is not None:
+                # Import with fallback for different working directories (Colab vs local)
                 try:
                     from src.adaptive_k import compute_density, adaptive_K
                 except ImportError:
-                    from adaptive_k import compute_density, adaptive_K
+                    try:
+                        from adaptive_k import compute_density, adaptive_K
+                    except ImportError:
+                        import importlib.util
+                        spec = importlib.util.spec_from_file_location(
+                            "adaptive_k",
+                            os.path.join(os.path.dirname(__file__), "adaptive_k.py"),
+                        )
+                        mod = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(mod)
+                        compute_density = mod.compute_density
+                        adaptive_K = mod.adaptive_K
                 need_apply = matcher.fill_next_token_bitmask(bitmask)
                 if need_apply:
                     density = compute_density(bitmask[0], vocab_size)
