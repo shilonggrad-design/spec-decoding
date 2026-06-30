@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-speculator.py — Speculative decoding with three configurations.
+speculator.py — Speculative decoding with four configurations.
 
 C1 (free spec):     No grammar anywhere. Draft and verify freely.
 C2 (verify-only):   Grammar bitmask applied only during target verification.
@@ -9,12 +9,16 @@ C3 (grammar-guided): Grammar bitmask on BOTH draft and target. Draft generates
                      grammar-valid tokens, target verifies. After draft, matcher
                      rolls back to pre-draft state so verify phase reconstructs
                      correct grammar path from actual accepted tokens.
+C4 (GrammarSD full): C3 + adaptive K driven by grammar mask density. Low density
+                     → large K (speculate aggressively); high density → small K
+                     (don't waste compute). Based on SpecDec++ threshold policy.
 
 Algorithm per round:
   1. Draft phase  — draft model autoregressively generates K tokens (greedy).
-                    C3: grammar mask applied per token, matcher advances, then rollback.
+                    C3/C4: grammar mask applied per token, matcher advances, then rollback.
+                    C4: K computed from current position density before drafting.
   2. Verify phase — target model single forward pass over [prefix + draft].
-                    C2/C3: grammar mask applied on target logits per position.
+                    C2/C3/C4: grammar mask applied on target logits per position.
   3. Accept/reject (greedy) — compare argmax at each position.
   4. If all K accepted → bonus token from logits at last position.
 """
@@ -35,7 +39,7 @@ import xgrammar as xgr
 TARGET_MODEL_ID = "Qwen/Qwen3.5-4B"
 DRAFT_MODEL_ID = "Qwen/Qwen3.5-0.8B"
 
-Config = Literal["C1", "C2", "C3"]
+Config = Literal["C1", "C2", "C3", "C4"]
 
 
 def load_models(device: str = "auto") -> tuple[AutoModelForCausalLM, AutoModelForCausalLM, AutoTokenizer]:
@@ -174,26 +178,28 @@ def speculative_decode(
 
     Returns:
         dict with keys: token_ids, text, accepted_count, drafted_count,
-        acceptance_rate, time_sec, density_trace (C2/C3 only), rounds
+        acceptance_rate, time_sec, density_trace (C2/C3/C4 only),
+        k_trace (C4 only), rounds
     """
-    assert config in ("C1", "C2", "C3"), f"Invalid config: {config}"
-    if config in ("C2", "C3"):
+    assert config in ("C1", "C2", "C3", "C4"), f"Invalid config: {config}"
+    if config in ("C2", "C3", "C4"):
         assert schema_str is not None, f"{config} requires a schema_str"
 
     vocab_size = target_model.config.vocab_size
     target_device = getattr(target_model, "device", "cpu")
     eos_token_id = tokenizer.eos_token_id
 
-    # Build grammar pipeline for C2/C3
+    # Build grammar pipeline for C2/C3/C4
     matcher: xgr.GrammarMatcher | None = None
     bitmask: torch.Tensor | None = None
-    if config in ("C2", "C3"):
+    if config in ("C2", "C3", "C4"):
         matcher, bitmask = build_grammar_pipeline(tokenizer, vocab_size, schema_str)
 
     generated: list[int] = []
     total_accepted = 0
     total_drafted = 0
     density_trace: list[float] = []
+    k_trace: list[tuple[float, int]] = []  # (density, K) per round, C4 only
     rounds = 0
     start = time.perf_counter()
 
@@ -206,16 +212,33 @@ def speculative_decode(
             prefix = torch.tensor(
                 [prompt_tokens + generated], dtype=torch.long, device=target_device
             )
-            if config == "C3" and matcher is not None and bitmask is not None:
+
+            # C4: compute adaptive K from current position density
+            current_K = K  # default fixed K
+            if config == "C4" and matcher is not None and bitmask is not None:
+                try:
+                    from src.adaptive_k import compute_density, adaptive_K
+                except ImportError:
+                    from adaptive_k import compute_density, adaptive_K
+                need_apply = matcher.fill_next_token_bitmask(bitmask)
+                if need_apply:
+                    density = compute_density(bitmask[0], vocab_size)
+                    current_K = adaptive_K(density)
+                else:
+                    density = 1.0
+                    current_K = K
+                k_trace.append((density, current_K))
+
+            if config in ("C3", "C4") and matcher is not None and bitmask is not None:
                 draft_tokens = draft_k_tokens(
-                    draft_model, prefix, K, eos_token_id,
+                    draft_model, prefix, current_K, eos_token_id,
                     matcher=matcher, bitmask=bitmask, vocab_size=vocab_size,
                 )
                 # Rollback matcher to pre-draft state for verify phase
                 if len(draft_tokens) > 0:
                     matcher.rollback(len(draft_tokens))
             else:
-                draft_tokens = draft_k_tokens(draft_model, prefix, K, eos_token_id)
+                draft_tokens = draft_k_tokens(draft_model, prefix, current_K, eos_token_id)
             if not draft_tokens:
                 break  # Draft produced EOS immediately
             n_draft = len(draft_tokens)
@@ -248,8 +271,8 @@ def speculative_decode(
                 verified_this_round += 1
                 position_logits = verify_logits[pos].clone()  # (vocab_size,)
 
-                # Apply grammar mask for C2/C3 before argmax
-                if config in ("C2", "C3") and matcher is not None and bitmask is not None:
+                # Apply grammar mask for C2/C3/C4 before argmax
+                if config in ("C2", "C3", "C4") and matcher is not None and bitmask is not None:
                     need_apply = matcher.fill_next_token_bitmask(bitmask)
                     if need_apply:
                         xgr.apply_token_bitmask_inplace(
@@ -270,7 +293,7 @@ def speculative_decode(
                     total_accepted += 1
 
                     # Tell grammar matcher about accepted token
-                    if config in ("C2", "C3") and matcher is not None:
+                    if config in ("C2", "C3", "C4") and matcher is not None:
                         accepted = matcher.accept_token(draft_tokens[i])
                         if not accepted:
                             print(f"[WARN] Grammar rejected accepted token {draft_tokens[i]}")
@@ -279,7 +302,7 @@ def speculative_decode(
                 else:
                     # Reject — take target's correction
                     generated.append(target_predicted)
-                    if config in ("C2", "C3") and matcher is not None:
+                    if config in ("C2", "C3", "C4") and matcher is not None:
                         matcher.accept_token(target_predicted)
                     rejected = True
                     break
@@ -293,7 +316,7 @@ def speculative_decode(
                 if bonus_pos < verify_logits.shape[0]:
                     bonus_logits = verify_logits[bonus_pos].clone()
 
-                    if config in ("C2", "C3") and matcher is not None and bitmask is not None:
+                    if config in ("C2", "C3", "C4") and matcher is not None and bitmask is not None:
                         need_apply = matcher.fill_next_token_bitmask(bitmask)
                         if need_apply:
                             xgr.apply_token_bitmask_inplace(
@@ -310,7 +333,7 @@ def speculative_decode(
                         break
 
                     generated.append(bonus_token)
-                    if config in ("C2", "C3") and matcher is not None:
+                    if config in ("C2", "C3", "C4") and matcher is not None:
                         matcher.accept_token(bonus_token)
                         if matcher.is_terminated():
                             break
@@ -337,6 +360,8 @@ def speculative_decode(
     }
     if density_trace:
         result["density_trace"] = density_trace
+    if k_trace:
+        result["k_trace"] = k_trace
 
     return result
 
@@ -348,7 +373,7 @@ def main() -> None:
     import os
 
     print("=" * 60)
-    print("Speculative Decoding: C1 (free) + C2 (verify-only) + C3 (grammar-guided)")
+    print("Speculative Decoding: C1 + C2 + C3 + C4 (full ablation)")
     print("=" * 60)
 
     target_model, draft_model, tokenizer = load_models()
@@ -367,7 +392,7 @@ def main() -> None:
     print(f"Prompt tokens: {len(prompt_tokens)}")
 
     results = {}
-    for cfg in ("C1", "C2", "C3"):
+    for cfg in ("C1", "C2", "C3", "C4"):
         print(f"\n--- {cfg} ---")
         result = speculative_decode(
             target_model, draft_model, tokenizer, prompt_tokens,
@@ -381,14 +406,16 @@ def main() -> None:
               f"({result['accepted_count']}/{result['drafted_count']})")
         print(f"Time: {result['time_sec']:.3f}s ({len(result['token_ids']) / max(result['time_sec'], 0.001):.1f} tok/s)")
         print(f"Output: {result['text'][:300]}...")
+        if "k_trace" in result:
+            print(f"K trace: {result['k_trace']}")
 
     # --- Comparison ---
     print("\n--- Comparison ---")
-    print(f"{'Metric':<20} {'C1':>12} {'C2':>12} {'C3':>12}")
-    print("-" * 56)
-    print(f"{'Tokens':<20} {len(results['C1']['token_ids']):>12} {len(results['C2']['token_ids']):>12} {len(results['C3']['token_ids']):>12}")
-    print(f"{'Time (s)':<20} {results['C1']['time_sec']:>12.3f} {results['C2']['time_sec']:>12.3f} {results['C3']['time_sec']:>12.3f}")
-    print(f"{'Accept rate':<20} {results['C1']['acceptance_rate']:>12.2%} {results['C2']['acceptance_rate']:>12.2%} {results['C3']['acceptance_rate']:>12.2%}")
+    print(f"{'Metric':<20} {'C1':>10} {'C2':>10} {'C3':>10} {'C4':>10}")
+    print("-" * 60)
+    print(f"{'Tokens':<20} {len(results['C1']['token_ids']):>10} {len(results['C2']['token_ids']):>10} {len(results['C3']['token_ids']):>10} {len(results['C4']['token_ids']):>10}")
+    print(f"{'Time (s)':<20} {results['C1']['time_sec']:>10.3f} {results['C2']['time_sec']:>10.3f} {results['C3']['time_sec']:>10.3f} {results['C4']['time_sec']:>10.3f}")
+    print(f"{'Accept rate':<20} {results['C1']['acceptance_rate']:>10.2%} {results['C2']['acceptance_rate']:>10.2%} {results['C3']['acceptance_rate']:>10.2%} {results['C4']['acceptance_rate']:>10.2%}")
 
 
 if __name__ == "__main__":
