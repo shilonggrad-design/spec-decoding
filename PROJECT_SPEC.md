@@ -280,7 +280,7 @@ No trained predictor needed. The grammar itself is the predictor.
 // Input: bitmask (uint64_t array, ceil(vocab_size/64) elements)
 // Output: float density = valid_tokens / vocab_size
 // Latency target: < 1μs (vocab=151K → 2361 uint64s → 1 warp in ~8 iterations)
-// NOTE: Qwen3.5 vocab size TBD at implementation time; adjust bitmask dimensions accordingly
+// NOTE: Qwen3.5 vocab_size = 248320 (confirmed 2026-06-29). bitmask = ceil(248320/32) = 7761 × int32 ≈ 31KB
 
 __global__ void popcount_density_kernel(
     const uint64_t* __restrict__ bitmask,
@@ -312,7 +312,7 @@ __global__ void popcount_density_kernel(
 **HPC talking points**:
 - `__popcll` is a single-instruction hardware intrinsic (not a loop)
 - Warp shuffle reduction (`__shfl_down_sync`) avoids shared memory round-trip
-- For vocab=151K (Qwen2.5 ref): bitmask = 2361 × uint64 = ~19KB → fits in L2 cache. Qwen3.5 vocab size TBD — update at implementation time.
+- Qwen3.5 vocab_size = 248320. bitmask = ceil(248320/32) = 7761 × uint32 ≈ 31KB → fits in L2 cache.
 - One warp (32 threads) processes 2361 / 32 ≈ 74 elements/thread → ~74 iterations
 - Total: launch + compute + reduce < 1μs on any modern GPU
 - Memory coalescing: bitmask stored as contiguous uint64 array, consecutive threads access consecutive elements
@@ -421,7 +421,7 @@ __global__ void fused_mask_softmax_sample_kernel(
 
 **HPC talking points**:
 - **Kernel fusion** is the canonical GPU optimization pattern: reduce global memory traffic
-- For vocab=151K (Qwen2.5 ref), logits array = 604KB (FP32) — reading it 3× (mask, softmax, sample) = 1.8MB. Fused = 604KB. 3× reduction in memory bandwidth. Qwen3.5 dimensions TBD at implementation time.
+- Qwen3.5 vocab_size = 248320. logits array = 248320 × 4B (FP32) ≈ 970KB. Reading 3× (mask, softmax, sample) = 2.9MB. Fused kernel = 970KB. 3× memory bandwidth reduction.
 - Online softmax algorithm (Milakov & Gimelshein, 2018): single-pass numerically stable softmax using running max + sum
 - Temperature scaling fused into the first read — no extra pass
 - Curand device API for in-kernel RNG
