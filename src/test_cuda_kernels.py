@@ -37,7 +37,7 @@ from src._kernels.kernel_loader import (  # noqa: E402
 # Constants matching Qwen3.5
 # ---------------------------------------------------------------------------
 VOCAB_SIZE = 248_320
-NUM_WORDS = (VOCAB_SIZE + 31) // 32  # = 7761
+NUM_WORDS = (VOCAB_SIZE + 31) // 32  # = 7760
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +182,14 @@ def test_argmax_batch():
     all_valid = [
         [100, 200, 300],       # position 0: token 300 has highest logit
         [10, 20, 30],          # position 1: token 30 has highest
-        [0, 1, 2],             # position 2: token 2 has highest
+        [3, 4, 5],             # position 2: token 5 has highest
         [500, 501, 502, 503],  # position 3: token 503 has highest
         [999, 1000, 1001],     # position 4: token 1001 has highest
         [777, 888],            # position 5: token 888 has highest
     ]
+
+    # Token 0 is NEVER valid in any position — use it as the "high but invalid" decoy
+    DECOY_TOKEN = 0
 
     # Build logits: random noise + peak at the correct token for each position
     logits_batch = torch.randn(K_plus_1, VOCAB_SIZE) * 0.1
@@ -195,8 +198,8 @@ def test_argmax_batch():
         # Make the last valid token have a very high logit
         peak_token = valid_indices[-1]
         logits_batch[pos, peak_token] = 42.0 + pos
-        # But set a higher invalid logit to ensure masking works
-        logits_batch[pos, 0] = 999.0  # invalid (not in bitmask)
+        # Set a higher INVALID logit to ensure masking works
+        logits_batch[pos, DECOY_TOKEN] = 999.0  # token 0 not in any valid set
         expected.append(peak_token)
 
     # Build batched bitmask [K+1, num_words]
