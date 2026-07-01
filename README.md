@@ -2,13 +2,7 @@
   <img src="assets/logo.png" alt="VeloSpec" height="120"/>
 </p>
 
-# VeloSpec
-
 > Grammar-aware adaptive speculative decoding for structured LLM output.
-
-<p align="center">
-  <img src="assets/banner.svg" alt="VeloSpec — Grammar-Aware Adaptive Speculative Decoding" width="100%"/>
-</p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -18,6 +12,10 @@ K tokens ahead, then verifying them in one target model forward pass. But when
 generating **structured output** (JSON, tool calls), the acceptance rate craters —
 the draft model doesn't know the grammar constraints and wastes proposals on
 invalid tokens.
+
+<p align="center">
+  <img src="assets/banner.svg" alt="VeloSpec — Grammar-Aware Adaptive Speculative Decoding" width="100%"/>
+</p>
 
 **VeloSpec fixes this with two techniques:**
 
