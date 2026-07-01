@@ -281,7 +281,7 @@ No trained predictor needed. The grammar itself is the predictor.
 // Output: float density = valid_tokens / vocab_size
 // Latency target: < 1μs (vocab=248320 → 7761 int32s → 256 threads in ~31 iterations)
 // NOTE: xgrammar allocates bitmask as int32 (not int64). __popc = 32-bit popcount intrinsic.
-// bitmask = ceil(248320/32) = 7761 × int32 ≈ 31KB → fits L2 cache
+// bitmask = ceil(248320/32) = 7760 × int32 ≈ 31KB → fits L2 cache
 
 __global__ void popcount_density_kernel(
     const int32_t* __restrict__ bitmask,
@@ -314,7 +314,7 @@ __global__ void popcount_density_kernel(
 **HPC talking points**:
 - `__popcll` is a single-instruction hardware intrinsic (not a loop)
 - Warp shuffle reduction (`__shfl_down_sync`) avoids shared memory round-trip
-- Qwen3.5 vocab_size = 248320. bitmask = ceil(248320/32) = 7761 × uint32 ≈ 31KB → fits in L2 cache.
+- Qwen3.5 vocab_size = 248320. bitmask = ceil(248320/32) = 7760 × uint32 ≈ 31KB → fits in L2 cache.
 - One warp (32 threads) processes 2361 / 32 ≈ 74 elements/thread → ~74 iterations
 - Total: launch + compute + reduce < 1μs on any modern GPU
 - Memory coalescing: bitmask stored as contiguous uint64 array, consecutive threads access consecutive elements

@@ -172,7 +172,7 @@ Results: 7 passed, 0 failed
 ### Step 3: Measure kernel speedup
 
 The test script includes a speedup measurement. Expected:
-- Python popcount: ~2-5ms for 7761 int32 words
+- Python popcount: ~2-5ms for 7760 int32 words
 - CUDA popcount: ~0.01-0.1ms
 - Speedup: 50-500×
 
@@ -215,10 +215,10 @@ print(is_cuda_available())  # True/False
 count, density = popcount_density(bitmask, vocab_size=248320)
 
 # Kernel 2: masked argmax (single position)
-token = grammar_masked_argmax(logits, bitmask, vocab_size=248320, num_words=7761)
+token = grammar_masked_argmax(logits, bitmask, vocab_size=248320, num_words=7760)
 
 # Kernel 3: fused sample (greedy)
-token = fused_sample(logits, bitmask, vocab_size=248320, num_words=7761, temperature=0)
+token = fused_sample(logits, bitmask, vocab_size=248320, num_words=7760, temperature=0)
 ```
 
 ---

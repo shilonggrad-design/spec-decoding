@@ -6,12 +6,12 @@
 // HPC talking points:
 // - __popc is a single-instruction hardware intrinsic for int32 popcount
 // - Warp shuffle reduction (__shfl_down_sync) avoids shared memory round-trip
-// - bitmask = ceil(248320/32) = 7761 × int32 ≈ 31KB → fits in L2 cache
+// - bitmask = ceil(248320/32) = 7760 × int32 ≈ 31KB → fits in L2 cache
 // - Grid-stride loop handles arbitrary vocab sizes
 // - Total latency: < 1μs on any modern GPU (latency-bound, not throughput-bound)
 //
 // Profiling plan: Nsight Compute
-// - Compare vs Python loop (current implementation, ~2ms for 7761 words)
+// - Compare vs Python loop (current implementation, ~2ms for 7760 words)
 // - Expected speedup: ~1000× (hardware popcount + warp reduction)
 // - Memory throughput: bitmask is tiny, bandwidth is not the bottleneck
 
@@ -23,7 +23,7 @@
 // ============================================================================
 //
 // Grid: 1 block, 256 threads (single warp group for small bitmask)
-// Each thread processes ceil(7761/256) ≈ 31 words via grid-stride loop
+// Each thread processes ceil(7760/256) ≈ 31 words via grid-stride loop
 //
 __global__ void popcount_density_kernel(
     const int32_t* __restrict__ bitmask,  // ceil(vocab_size / 32) elements
@@ -64,7 +64,7 @@ void popcount_density_launcher(
     TORCH_CHECK(bitmask.dtype() == torch::kInt32, "bitmask must be int32");
     TORCH_CHECK(total_count.is_cuda(), "total_count must be on CUDA device");
 
-    // 256 threads = 8 warps, enough for 7761 elements
+    // 256 threads = 8 warps, enough for 7760 elements
     // Single block is sufficient — this is a tiny reduction
     int threads = 256;
     int blocks = 1;
