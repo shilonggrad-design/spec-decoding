@@ -1,5 +1,9 @@
 # VeloSpec
 
+<p align="center">
+  <img src="assets/banner.svg" alt="VeloSpec — Grammar-Aware Adaptive Speculative Decoding" width="100%"/>
+</p>
+
 > Grammar-aware adaptive speculative decoding for structured LLM output.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
