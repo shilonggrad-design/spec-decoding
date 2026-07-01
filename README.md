@@ -16,7 +16,7 @@ This project fixes it two ways:
 - [x] vLLM/SGLang source code analysis (source-verified from `main` branch)
 - [x] Project spec (see [PROJECT_SPEC.md](PROJECT_SPEC.md))
 - [x] Week 1: C1 free spec + C2 verify-only grammar — acceptance gap measured and root-caused
-- [x] Week 2: C3 grammar-guided + C4 adaptive K + CUDA kernels — code complete
+- [x] Week 2: C3 grammar-guided + C4 adaptive K + CUDA kernels — **validated (7/7 tests, 111× speedup)**
 - [ ] Week 3: Nsight profiling + optimization sweep
 - [ ] Week 4: Polish + upstream transition plan
 
