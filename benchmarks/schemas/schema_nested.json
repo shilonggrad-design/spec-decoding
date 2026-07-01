@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "properties": {
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "age": {"type": "integer"},
+          "address": {
+            "type": "object",
+            "properties": {
+              "street": {"type": "string"},
+              "city": {"type": "string"},
+              "zip": {"type": "string"},
+              "country": {"type": "string"}
+            },
+            "required": ["city", "country"]
+          },
+          "tags": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["name", "address"]
+      }
+    },
+    "total_count": {"type": "integer"},
+    "page": {"type": "integer"}
+  },
+  "required": ["users", "total_count"]
+}
