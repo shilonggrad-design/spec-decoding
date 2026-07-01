@@ -78,12 +78,11 @@ C3 consistently and significantly closes the grammar gap across all schema types
 - [x] C3 implementation + validation (Day 1)
 - [x] C4 implementation + quick test (Day 2)
 - [x] Full 60-trial benchmark (Day 3)
+- [x] CUDA kernel compilation + 7/7 validation (Day 4)
 - [x] Analysis and documentation
 
-### Ready to run (Day 4-7)
-- [ ] CUDA kernel compilation (`python setup.py build_ext --inplace`)
-- [ ] 7-test kernel validation (`python src/test_cuda_kernels.py`)
-- [ ] Tag `v0.2-cuda-adaptive`
+### Tagged
+- `v0.2-cuda-adaptive` — C3 grammar-guided draft, C4 adaptive K, 3 CUDA kernels validated
 
 ### Week 3 plan
 - Nsight Compute profiling of 3 CUDA kernels
