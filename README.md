@@ -1,11 +1,12 @@
-<p align="center">
-  <img src="assets/logo.png" alt="VeloSpec" height="120"/>
-</p>
-
-> Grammar-aware adaptive speculative decoding for structured LLM output.
+<div align="center" id="velospectop">  
+<img src="assets/logo.png" alt="VeloSpec" height="100"/>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+</div>
+
+> Grammar-aware adaptive speculative decoding for structured LLM output.
+
 
 Speculative decoding accelerates LLM inference by having a small draft model guess
 K tokens ahead, then verifying them in one target model forward pass. But when
