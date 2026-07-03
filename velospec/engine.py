@@ -83,6 +83,7 @@ class VeloSpec:
         K: int = 5,
         device: str = "auto",
         dtype: torch.dtype | None = None,
+        backend: str = "auto",
     ) -> None:
         assert config in ("C1", "C2", "C3", "C4"), f"Invalid config: {config}"
         self.target_id = target_model
@@ -95,6 +96,16 @@ class VeloSpec:
             self._dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         else:
             self._dtype = dtype
+
+        # Backend: "auto" → prefer Triton, "cuda" → xgrammar+PyTorch fallback
+        if backend == "auto":
+            try:
+                from velospec.triton.fused_logit_processor import is_available
+                self._backend = "triton" if is_available() else "cuda"
+            except ImportError:
+                self._backend = "cuda"
+        else:
+            self._backend = backend
 
         # Lazy-loaded
         self._target: AutoModelForCausalLM | None = None
@@ -185,6 +196,32 @@ class VeloSpec:
             valid += bin(bits).count("1")
         return valid
 
+    def _masked_argmax(
+        self, logits: torch.Tensor, bitmask: torch.Tensor, device: str
+    ) -> tuple[int, float]:
+        """Grammar-masked argmax + density. Dispatches to Triton or CUDA fallback.
+
+        Args:
+            logits: 1-D float tensor [vocab_size], on GPU.
+            bitmask: 1-D int32 tensor [num_words], on GPU (xgrammar bitmask).
+            device: target device string.
+
+        Returns:
+            (token_id, density) where density = valid_tokens / vocab_size.
+        """
+        if self._backend == "triton" and logits.is_cuda:
+            from velospec.triton.fused_logit_processor import fused_masked_argmax
+            return fused_masked_argmax(logits, bitmask.to(device))
+
+        # Fallback: xgrammar apply + PyTorch argmax + Python popcount
+        xgr.apply_token_bitmask_inplace(
+            logits.unsqueeze(0), bitmask.to(device)
+        )
+        masked = logits.unsqueeze(0)[0]
+        valid = self._popcount_mask(bitmask[0], self._vocab_size)
+        density = valid / self._vocab_size
+        return masked.argmax().item(), density
+
     def _draft_k_tokens(
         self,
         input_ids: torch.Tensor,
@@ -206,11 +243,13 @@ class VeloSpec:
                 if matcher is not None and bitmask is not None:
                     need_apply = matcher.fill_next_token_bitmask(bitmask)
                     if need_apply:
-                        xgr.apply_token_bitmask_inplace(
-                            next_logits, bitmask.to(draft_device)
+                        next_id, _ = self._masked_argmax(
+                            next_logits[0], bitmask, draft_device
                         )
-
-                next_id = next_logits.argmax(dim=-1).item()
+                    else:
+                        next_id = next_logits.argmax(dim=-1).item()
+                else:
+                    next_id = next_logits.argmax(dim=-1).item()
 
                 if next_id == self._eos_token_id:
                     break
@@ -330,16 +369,15 @@ class VeloSpec:
                     if self.config in ("C2", "C3", "C4") and matcher is not None and bitmask is not None:
                         need_apply = matcher.fill_next_token_bitmask(bitmask)
                         if need_apply:
-                            xgr.apply_token_bitmask_inplace(
-                                position_logits.unsqueeze(0), bitmask.to(target_device)
+                            target_predicted, density = self._masked_argmax(
+                                position_logits, bitmask, target_device
                             )
-                            position_logits = position_logits.unsqueeze(0)[0]
-                            valid = self._popcount_mask(bitmask[0], self._vocab_size)
-                            density_trace.append(valid / self._vocab_size)
+                            density_trace.append(density)
                         else:
+                            target_predicted = position_logits.argmax().item()
                             density_trace.append(1.0)
-
-                    target_predicted = position_logits.argmax().item()
+                    else:
+                        target_predicted = position_logits.argmax().item()
 
                     if target_predicted == draft_tokens[i]:
                         generated.append(draft_tokens[i])
@@ -368,15 +406,15 @@ class VeloSpec:
                         if self.config in ("C2", "C3", "C4") and matcher is not None and bitmask is not None:
                             need_apply = matcher.fill_next_token_bitmask(bitmask)
                             if need_apply:
-                                xgr.apply_token_bitmask_inplace(
-                                    bonus_logits.unsqueeze(0), bitmask.to(target_device)
+                                bonus_token, density = self._masked_argmax(
+                                    bonus_logits, bitmask, target_device
                                 )
-                                valid = self._popcount_mask(bitmask[0], self._vocab_size)
-                                density_trace.append(valid / self._vocab_size)
+                                density_trace.append(density)
                             else:
+                                bonus_token = bonus_logits.argmax().item()
                                 density_trace.append(1.0)
-
-                        bonus_token = bonus_logits.argmax().item()
+                        else:
+                            bonus_token = bonus_logits.argmax().item()
 
                         if bonus_token == self._eos_token_id:
                             break
