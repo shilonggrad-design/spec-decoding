@@ -29,6 +29,9 @@ Two-pass reduction (vocab_size = 248320 > max Triton block size):
   Pass 1 (N blocks): Each block finds local argmax (value + index) + valid count.
   Pass 2 (1 block):  Finds global argmax across all blocks + sums valid counts.
 
+Each token loads its own bitmask word directly: word_idx = token_idx // 32.
+Adjacent tokens (within same int32 word) hit the same cache line → efficient.
+
 Fallback: If Triton is not available, engine.py uses xgrammar + PyTorch directly.
 """
 
@@ -68,31 +71,23 @@ if _TRITON_AVAILABLE:
         vocab_size: tl.int32,
         num_words: tl.int32,
         BLOCK_SIZE: tl.constexpr,       # tokens per block (e.g. 4096)
-        WORDS_PER_BLOCK: tl.constexpr, # bitmask words per block (BLOCK_SIZE // 32)
     ):
         pid = tl.program_id(0)
         block_start = pid * BLOCK_SIZE
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
-        in_range = offsets < vocab_size  # mask for out-of-range tokens
+        in_range = offsets < vocab_size
 
         # --- Load logits ---
         logits = tl.load(logits_ptr + offsets, mask=in_range, other=float('-inf'))
 
-        # --- Load bitmask words for this block ---
-        # BLOCK_SIZE tokens span WORDS_PER_BLOCK = ceil(BLOCK_SIZE / 32) int32 words
-        first_word = block_start // 32
-        word_offsets = first_word + tl.arange(0, WORDS_PER_BLOCK)
+        # --- Load bitmask: each token loads its own word directly ---
+        word_offsets = offsets // 32
         word_in_range = word_offsets < num_words
         words = tl.load(bitmask_ptr + word_offsets, mask=word_in_range, other=0)
 
-        # Map each token to its local word index within the loaded array
-        local_word_idx = (offsets - block_start) // 32
-        local_word_idx = tl.minimum(local_word_idx, WORDS_PER_BLOCK - 1)
-        word_val = words[local_word_idx]
-
         # Extract bit for each token: bit = (word >> bit_pos) & 1
         bit_pos = offsets % 32
-        bits = (word_val >> bit_pos) & 1
+        bits = (words >> bit_pos) & 1
 
         # --- Apply grammar mask: illegal tokens → -inf ---
         masked_logits = tl.where(bits == 1, logits, float('-inf'))
@@ -160,7 +155,7 @@ if _TRITON_AVAILABLE:
 # ---------------------------------------------------------------------------
 # Python wrapper
 # ---------------------------------------------------------------------------
-DEFAULT_BLOCK_SIZE = 4096  # tokens per block; each block covers 128 bitmask words
+DEFAULT_BLOCK_SIZE = 4096  # tokens per block
 
 
 def fused_masked_argmax(
@@ -189,7 +184,6 @@ def fused_masked_argmax(
 
     vocab_size = logits.shape[0]
     num_words = (vocab_size + 31) // 32
-    words_per_block = (block_size + 31) // 32
     num_blocks = triton.cdiv(vocab_size, block_size)
 
     # Ensure contiguous; cast to float32 for numerical stability
@@ -207,7 +201,6 @@ def fused_masked_argmax(
         block_max_val, block_max_idx, block_valid_cnt,
         vocab_size, num_words,
         BLOCK_SIZE=block_size,
-        WORDS_PER_BLOCK=words_per_block,
     )
 
     # --- Pass 2: cross-block final reduction ---
