@@ -60,9 +60,8 @@ def test_known_answer():
     logits[42] = 5.0
     logits[99] = 3.0
 
-    # Allow only first 64 tokens
-    bitmask = torch.tensor([0xFFFFFFFF, 0xFFFFFFFF, 0, 0],
-                           dtype=torch.int32, device="cuda")
+    # Allow only first 64 tokens (all bits set = -1 in signed int32)
+    bitmask = torch.tensor([-1, -1, 0, 0], dtype=torch.int32, device="cuda")
 
     token_id, density = fused_masked_argmax(logits, bitmask)
 
@@ -126,7 +125,7 @@ def test_edge_cases():
     # 3a: all valid
     vocab_size = 64
     logits = torch.randn(vocab_size, dtype=torch.float32, device="cuda")
-    bitmask = torch.tensor([0xFFFFFFFF, 0xFFFFFFFF], dtype=torch.int32, device="cuda")
+    bitmask = torch.tensor([-1, -1], dtype=torch.int32, device="cuda")
     tid, dens = fused_masked_argmax(logits, bitmask)
     assert dens == 1.0, f"All-valid density should be 1.0, got {dens}"
     assert tid == logits.argmax().item()
