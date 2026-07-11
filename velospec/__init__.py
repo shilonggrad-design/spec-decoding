@@ -16,7 +16,13 @@ Quickstart:
     print(result.text, result.acceptance)
 """
 
-from velospec.engine import VeloSpec, GenerationResult
-
 __version__ = "0.2.0"
+
+# Lazy imports — avoids hard dependency on xgrammar/torch for kernel-only usage
+def __getattr__(name: str):
+    if name in ("VeloSpec", "GenerationResult"):
+        from velospec.engine import VeloSpec, GenerationResult
+        return {"VeloSpec": VeloSpec, "GenerationResult": GenerationResult}[name]
+    raise AttributeError(f"module 'velospec' has no attribute {name!r}")
+
 __all__ = ["VeloSpec", "GenerationResult"]
