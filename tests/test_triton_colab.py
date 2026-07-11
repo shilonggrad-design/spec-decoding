@@ -4,14 +4,17 @@ Colab validation script for VeloSpec Triton kernel.
 Usage in Colab:
   !git clone https://github.com/shilonggrad-design/spec-decoding
   %cd spec-decoding
-  !pip install -e .
   !pip install triton
   !python tests/test_triton_colab.py
 """
 
+import os
 import sys
 import time
 import torch
+
+# Ensure the repo root is on sys.path so `import velospec` works without pip install
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 print("=" * 60)
 print("VeloSpec Triton Kernel — Colab Validation")
