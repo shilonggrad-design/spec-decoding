@@ -164,28 +164,32 @@ def test_batch_correctness():
                             (B, vocab_size // 32), dtype=torch.int32, device="cuda")
 
     # Reference: run single-row kernel for each row
+    # ⚠️ Must sync+clone: _sync=False returns shared buffer refs that get overwritten
     ref_ids = []
     ref_valids = []
     for b in range(B):
-        tid, dens = fused_masked_argmax(logits[b], bitmask[b], _sync=False)
+        tid, dens = fused_masked_argmax(logits[b], bitmask[b], _sync=True)
         ref_ids.append(tid)
-        ref_valids.append(dens)
-    # Sync all at once
-    ref_ids_t = torch.stack(ref_ids)
-    ref_valids_t = torch.stack(ref_valids)
+        ref_valids.append(int(dens * vocab_size))
 
     # Batch kernel
     batch_ids, batch_valids = fused_masked_argmax_batch(logits, bitmask)
 
-    match = (batch_ids == ref_ids_t).all().item()
-    valids_match = torch.allclose(batch_valids, ref_valids_t, atol=1)
+    match = True
+    for b in range(B):
+        if batch_ids[b].item() != ref_ids[b]:
+            match = False
+    valids_match = True
+    for b in range(B):
+        if abs(batch_valids[b].item() - ref_valids[b]) > 1:
+            valids_match = False
 
     print(f"  Argmax match:  {'✅' if match else '❌'}")
     print(f"  Valid match:   {'✅' if valids_match else '❌'}")
     if not match:
         for b in range(B):
-            same = "✅" if batch_ids[b].item() == ref_ids_t[b].item() else "❌"
-            print(f"    row {b}: batch={batch_ids[b].item()}, single={ref_ids_t[b].item()} {same}")
+            same = "✅" if batch_ids[b].item() == ref_ids[b] else "❌"
+            print(f"    row {b}: batch={batch_ids[b].item()}, single={ref_ids[b]} {same}")
 
     assert match, "Batch argmax mismatch"
     assert valids_match, "Batch valid count mismatch"
