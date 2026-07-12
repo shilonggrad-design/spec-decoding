@@ -204,6 +204,9 @@ def fused_masked_argmax(
     )
 
     # --- Pass 2: cross-block final reduction ---
+    # Triton requires BLOCK_SIZE to be a power of 2
+    final_block_size = min(triton.next_power_of_2(num_blocks), 1024)
+
     final_argmax = torch.empty(1, dtype=torch.int32, device=logits.device)
     final_valid = torch.empty(1, dtype=torch.float32, device=logits.device)
 
@@ -211,7 +214,7 @@ def fused_masked_argmax(
         block_max_val, block_max_idx, block_valid_cnt,
         final_argmax, final_valid,
         num_blocks, vocab_size,
-        BLOCK_SIZE=min(num_blocks + 1, 1024),
+        BLOCK_SIZE=final_block_size,
     )
 
     token_id = final_argmax.item()
