@@ -37,6 +37,25 @@ Benchmarked on Qwen3.5-4B / 0.8B (vocab=248,320), 60 trials across 4 configs × 
 | C3 | Grammar-guided draft (this project) | **78%** | +26% accept |
 | **C4** | **C3 + adaptive K (this project)** | **79%** | **+42% throughput** |
 
+### Triton Fused Logit Processor (validated on A100)
+
+Replaces xgrammar mask + PyTorch argmax + CPU popcount with a single fused two-pass
+Triton kernel. Batch mode processes all K+1 verify positions in one kernel launch.
+
+**Correctness:** ✅ verified across 5 vocab sizes (128 – 248,320), all edge cases pass.
+
+**Performance (A100-SXM4, fp16, vocab=248,320):**
+
+| Mode | K+1 positions | Triton | PyTorch baseline | Speedup |
+|------|---------------|--------|-------------------|---------|
+| Single-row | 1 | 77 μs | 101 μs | 1.3× |
+| **Batch** | **6** (K=5) | **83 μs** | **649 μs** | **7.8×** |
+| Batch | 8 | 76 μs | 877 μs | 11.5× |
+| Batch | 12 | 77 μs | 1331 μs | 17.3× |
+
+> Batch mode time stays flat as K+1 grows — A100's 108 SMs parallelize rows for free.
+> At K=5 (VeloSpec default), the fused kernel saves ~566 μs per verify round.
+
 Custom CUDA kernels deliver **111× speedup** on the grammar mask density computation
 (`__popc` hardware intrinsic + warp shuffle reduction).
 
@@ -202,16 +221,13 @@ Returns `GenerationResult` with:
 ```
 spec-decoding/
 ├── velospec/                    ← Python package
-│   ├── __init__.py              ← Public API
+│   ├── __init__.py              ← Public API (lazy imports)
 │   ├── engine.py                ← VeloSpec class + speculative_decode
 │   ├── adaptive_k.py            ← Density → K controller
 │   ├── cli.py                   ← CLI entry point
-│   └── kernels/                 ← CUDA kernels
-│       ├── loader.py            ← Python wrapper + fallback
-│       ├── popcount_density.cu  ← Kernel 1: grammar density
-│       ├── grammar_masked_argmax.cu ← Kernel 2: fused mask+argmax
-│       ├── fused_sample.cu      ← Kernel 3: fused mask+softmax+sample
-│       └── bindings.cpp         ← pybind11
+│   ├── kernels/                 ← CUDA kernels (density, argmax, sampling)
+│   └── triton/                  ← Triton kernels (fused logit processor)
+│       └── fused_logit_processor.py ← Batch fused masked argmax + density
 ├── benchmarks/                  ← Benchmark schemas
 ├── tests/                       ← Kernel validation tests
 ├── examples/                    ← Quickstart demo
