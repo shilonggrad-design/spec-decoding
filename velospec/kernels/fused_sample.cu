@@ -5,7 +5,7 @@
 // 2. Online softmax (numerically stable: running max + running sum)
 // 3. Inverse CDF sampling → output 1 token
 //
-// This is the most interview-impressive kernel because:
+// This kernel demonstrates three GPU optimization techniques:
 // - Kernel fusion = canonical GPU optimization (reduce global memory traffic)
 // - Online softmax = single-pass numerically stable algorithm (Milakov & Gimelshein, 2018)
 // - 3× memory bandwidth reduction: 970KB read vs 2.9MB unfused
