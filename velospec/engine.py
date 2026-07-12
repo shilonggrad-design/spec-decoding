@@ -90,7 +90,7 @@ class VeloSpec:
         self.draft_id = draft_model
         self.config = config
         self.K = K
-        self._device = device
+        self._device = "cuda" if device == "auto" and torch.cuda.is_available() else device
 
         if dtype is None:
             self._dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -125,11 +125,11 @@ class VeloSpec:
             self.target_id, trust_remote_code=True
         )
         self._target = AutoModelForCausalLM.from_pretrained(
-            self.target_id, dtype=self._dtype, device_map=self._device,
+            self.target_id, torch_dtype=self._dtype, device_map=self._device,
             trust_remote_code=True,
         )
         self._draft = AutoModelForCausalLM.from_pretrained(
-            self.draft_id, dtype=self._dtype, device_map=self._device,
+            self.draft_id, torch_dtype=self._dtype, device_map=self._device,
             trust_remote_code=True,
         )
 
