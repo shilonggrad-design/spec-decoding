@@ -139,7 +139,7 @@ def test_edge_cases():
     print(f"  3b Single-valid: argmax={tid}, density={dens:.4f} ✅")
 
     # 3c: negative int32 (bit 31 set) — ensure kernel handles signed ints
-    bitmask = torch.tensor([-1, -1], dtype=torch.int32, device="cuda")  # all bits set
+    bitmask = torch.tensor([-1, -1], dtype=torch.int32, device="cuda")
     tid, dens = fused_masked_argmax(logits, bitmask)
     assert dens == 1.0
     assert tid == logits.argmax().item()
@@ -147,10 +147,58 @@ def test_edge_cases():
 
 
 # ===========================================================================
+# Test 3b: Batch mode correctness
+# ===========================================================================
+def test_batch_correctness():
+    """Verify batch kernel matches single-row kernel for each row."""
+    from velospec.triton.fused_logit_processor import fused_masked_argmax_batch
+
+    print("\n▶ Test 3b: Batch correctness (B=8, vocab=248320)")
+
+    vocab_size = 248320
+    B = 8
+    torch.manual_seed(99)
+
+    logits = torch.randn(B, vocab_size, dtype=torch.float16, device="cuda")
+    bitmask = torch.randint(-(2**31), 2**31 - 1,
+                            (B, vocab_size // 32), dtype=torch.int32, device="cuda")
+
+    # Reference: run single-row kernel for each row
+    ref_ids = []
+    ref_valids = []
+    for b in range(B):
+        tid, dens = fused_masked_argmax(logits[b], bitmask[b], _sync=False)
+        ref_ids.append(tid)
+        ref_valids.append(dens)
+    # Sync all at once
+    ref_ids_t = torch.stack(ref_ids)
+    ref_valids_t = torch.stack(ref_valids)
+
+    # Batch kernel
+    batch_ids, batch_valids = fused_masked_argmax_batch(logits, bitmask)
+
+    match = (batch_ids == ref_ids_t).all().item()
+    valids_match = torch.allclose(batch_valids, ref_valids_t, atol=1)
+
+    print(f"  Argmax match:  {'✅' if match else '❌'}")
+    print(f"  Valid match:   {'✅' if valids_match else '❌'}")
+    if not match:
+        for b in range(B):
+            same = "✅" if batch_ids[b].item() == ref_ids_t[b].item() else "❌"
+            print(f"    row {b}: batch={batch_ids[b].item()}, single={ref_ids_t[b].item()} {same}")
+
+    assert match, "Batch argmax mismatch"
+    assert valids_match, "Batch valid count mismatch"
+    print("  → PASS ✅")
+
+
+# ===========================================================================
 # Test 4: Performance — Triton vs PyTorch (fair comparison)
 # ===========================================================================
 def test_performance():
     """Benchmark Triton kernel vs PyTorch mask+argmax baseline."""
+    from velospec.triton.fused_logit_processor import fused_masked_argmax_batch
+
     print("\n▶ Test 4: Performance (vocab=248320)")
 
     vocab_size = 248320
@@ -177,8 +225,7 @@ def test_performance():
     torch.cuda.synchronize()
     triton_sync_us = (time.perf_counter() - t0) / N * 1e6
 
-    # --- Benchmark Triton (optimized: pre-alloc + async) ---
-    # Simulate batch usage: run N calls, only sync at the end
+    # --- Benchmark Triton (async) ---
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(N):
@@ -186,7 +233,7 @@ def test_performance():
     torch.cuda.synchronize()
     triton_async_us = (time.perf_counter() - t0) / N * 1e6
 
-    # --- Benchmark PyTorch (mask + argmax only, pre-allocated mask) ---
+    # --- Benchmark PyTorch ---
     for _ in range(10):
         masked = logits.float().clone()
         masked[~token_mask] = float("-inf")
@@ -201,11 +248,51 @@ def test_performance():
     torch.cuda.synchronize()
     pytorch_us = (time.perf_counter() - t0) / N * 1e6
 
-    print(f"  Triton (sync):   {triton_sync_us:.1f} μs/call")
-    print(f"  Triton (async):  {triton_async_us:.1f} μs/call")
-    print(f"  PyTorch:         {pytorch_us:.1f} μs/call")
-    print(f"  Speedup (sync):  {pytorch_us / triton_sync_us:.1f}×")
-    print(f"  Speedup (async): {pytorch_us / triton_async_us:.1f}×")
+    print(f"  Single-row results:")
+    print(f"    Triton (sync):   {triton_sync_us:.1f} μs/call")
+    print(f"    Triton (async):  {triton_async_us:.1f} μs/call")
+    print(f"    PyTorch:         {pytorch_us:.1f} μs/call")
+    print(f"    Speedup (sync):  {pytorch_us / triton_sync_us:.1f}×")
+    print(f"    Speedup (async): {pytorch_us / triton_async_us:.1f}×")
+
+    # --- Benchmark BATCH mode (K+1 positions, like spec decoding verify phase) ---
+    print(f"\n  Batch mode (simulates spec decoding verify phase):")
+
+    for K_plus_1 in [2, 6, 8, 12]:
+        batch_logits = torch.randn(K_plus_1, vocab_size, dtype=torch.float16, device="cuda")
+        batch_bitmask = torch.randint(-(2**31), 2**31 - 1,
+                                      (K_plus_1, vocab_size // 32),
+                                      dtype=torch.int32, device="cuda")
+
+        # PyTorch batch: loop K+1 times
+        token_masks = [expand_bitmask(batch_bitmask[b], vocab_size) for b in range(K_plus_1)]
+
+        # Warmup
+        for _ in range(10):
+            fused_masked_argmax_batch(batch_logits, batch_bitmask)
+
+        # Triton batch
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(N):
+            fused_masked_argmax_batch(batch_logits, batch_bitmask)
+        torch.cuda.synchronize()
+        triton_batch_us = (time.perf_counter() - t0) / N * 1e6
+
+        # PyTorch sequential (K+1 calls)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(N):
+            for b in range(K_plus_1):
+                masked = batch_logits[b].float().clone()
+                masked[~token_masks[b]] = float("-inf")
+                _ = masked.argmax().item()
+        torch.cuda.synchronize()
+        pytorch_batch_us = (time.perf_counter() - t0) / N * 1e6
+
+        speedup = pytorch_batch_us / triton_batch_us
+        print(f"    K+1={K_plus_1:>2d}:  Triton {triton_batch_us:>7.1f} μs  |  "
+              f"PyTorch {pytorch_batch_us:>7.1f} μs  |  {speedup:.1f}×")
 
 
 # ===========================================================================
@@ -241,6 +328,7 @@ if __name__ == "__main__":
     test_known_answer()
     test_correctness_full()
     test_edge_cases()
+    test_batch_correctness()
     test_performance()
     test_multiple_sizes()
 
