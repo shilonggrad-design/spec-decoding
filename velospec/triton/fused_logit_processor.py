@@ -157,11 +157,31 @@ if _TRITON_AVAILABLE:
 # ---------------------------------------------------------------------------
 DEFAULT_BLOCK_SIZE = 4096  # tokens per block
 
+# Buffer cache: avoids repeated CUDA malloc per call.
+# Keyed by (vocab_size, device_str, block_size).
+_buffer_cache: dict = {}
+
+
+def _get_buffers(vocab_size: int, device: torch.device, block_size: int):
+    """Get or create reusable GPU buffers for the two-pass reduction."""
+    key = (vocab_size, str(device), block_size)
+    if key not in _buffer_cache:
+        num_blocks = triton.cdiv(vocab_size, block_size)
+        _buffer_cache[key] = {
+            "block_max_val": torch.empty(num_blocks, dtype=torch.float32, device=device),
+            "block_max_idx": torch.empty(num_blocks, dtype=torch.int32, device=device),
+            "block_valid_cnt": torch.empty(num_blocks, dtype=torch.int32, device=device),
+            "final_argmax": torch.empty(1, dtype=torch.int32, device=device),
+            "final_valid": torch.empty(1, dtype=torch.float32, device=device),
+        }
+    return _buffer_cache[key]
+
 
 def fused_masked_argmax(
     logits: torch.Tensor,
     bitmask: torch.Tensor,
     block_size: int = DEFAULT_BLOCK_SIZE,
+    _sync: bool = True,
 ) -> tuple[int, float]:
     """Fused grammar-masked argmax + density — single GPU kernel pipeline.
 
@@ -169,11 +189,11 @@ def fused_masked_argmax(
         logits: Shape ``[vocab_size]``, float16 or float32, on GPU.
         bitmask: Shape ``[num_words]``, int32, on GPU (xgrammar bitmask).
         block_size: Tokens per Triton block (default 4096).
+        _sync: If True, sync GPU and return Python (int, float).
+               If False, return GPU tensors lazily (caller must .item() later).
 
     Returns:
         ``(token_id, density)`` where *density* = valid_tokens / vocab_size.
-
-    Eliminates 2 kernel launches and 1 CPU popcount loop per call.
     """
     if not _TRITON_AVAILABLE:
         raise RuntimeError(
@@ -186,39 +206,36 @@ def fused_masked_argmax(
     num_words = (vocab_size + 31) // 32
     num_blocks = triton.cdiv(vocab_size, block_size)
 
-    # Ensure contiguous; cast to float32 for numerical stability
-    logits = logits.contiguous().float()
-    bitmask = bitmask.contiguous()
+    # Reuse pre-allocated buffers (avoids 5× CUDA malloc per call)
+    bufs = _get_buffers(vocab_size, logits.device, block_size)
 
-    # --- Allocate intermediate buffers (one element per block) ---
-    block_max_val = torch.empty(num_blocks, dtype=torch.float32, device=logits.device)
-    block_max_idx = torch.empty(num_blocks, dtype=torch.int32, device=logits.device)
-    block_valid_cnt = torch.empty(num_blocks, dtype=torch.int32, device=logits.device)
+    # Cast fp16 → fp32 in-kernel, avoid host-side .float() conversion
+    if logits.dtype != torch.float32:
+        logits = logits.to(torch.float32)
 
     # --- Pass 1: block-level reduction ---
     _block_reduce_kernel[(num_blocks,)](
         logits, bitmask,
-        block_max_val, block_max_idx, block_valid_cnt,
+        bufs["block_max_val"], bufs["block_max_idx"], bufs["block_valid_cnt"],
         vocab_size, num_words,
         BLOCK_SIZE=block_size,
     )
 
     # --- Pass 2: cross-block final reduction ---
-    # Triton requires BLOCK_SIZE to be a power of 2
     final_block_size = min(triton.next_power_of_2(num_blocks), 1024)
 
-    final_argmax = torch.empty(1, dtype=torch.int32, device=logits.device)
-    final_valid = torch.empty(1, dtype=torch.float32, device=logits.device)
-
     _final_reduce_kernel[(1,)](
-        block_max_val, block_max_idx, block_valid_cnt,
-        final_argmax, final_valid,
+        bufs["block_max_val"], bufs["block_max_idx"], bufs["block_valid_cnt"],
+        bufs["final_argmax"], bufs["final_valid"],
         num_blocks, vocab_size,
         BLOCK_SIZE=final_block_size,
     )
 
-    token_id = final_argmax.item()
-    valid_count = final_valid.item()
-    density = valid_count / vocab_size if vocab_size > 0 else 0.0
+    if _sync:
+        token_id = bufs["final_argmax"].item()
+        valid_count = bufs["final_valid"].item()
+        density = valid_count / vocab_size if vocab_size > 0 else 0.0
+        return token_id, density
 
-    return token_id, density
+    # Async mode: return GPU tensors (no CPU sync)
+    return bufs["final_argmax"], bufs["final_valid"]

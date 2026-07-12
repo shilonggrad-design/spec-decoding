@@ -165,19 +165,28 @@ def test_performance():
 
     N = 100
 
-    # --- Warmup Triton ---
+    # --- Warmup Triton (fills buffer cache + JIT compile) ---
     for _ in range(10):
         fused_masked_argmax(logits, bitmask)
 
-    # --- Benchmark Triton ---
+    # --- Benchmark Triton (sync mode — current API) ---
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(N):
-        fused_masked_argmax(logits, bitmask)
+        fused_masked_argmax(logits, bitmask, _sync=True)
     torch.cuda.synchronize()
-    triton_us = (time.perf_counter() - t0) / N * 1e6
+    triton_sync_us = (time.perf_counter() - t0) / N * 1e6
 
-    # --- Benchmark PyTorch (mask + argmax only, no mask construction) ---
+    # --- Benchmark Triton (optimized: pre-alloc + async) ---
+    # Simulate batch usage: run N calls, only sync at the end
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(N):
+        fused_masked_argmax(logits, bitmask, _sync=False)
+    torch.cuda.synchronize()
+    triton_async_us = (time.perf_counter() - t0) / N * 1e6
+
+    # --- Benchmark PyTorch (mask + argmax only, pre-allocated mask) ---
     for _ in range(10):
         masked = logits.float().clone()
         masked[~token_mask] = float("-inf")
@@ -192,9 +201,11 @@ def test_performance():
     torch.cuda.synchronize()
     pytorch_us = (time.perf_counter() - t0) / N * 1e6
 
-    print(f"  Triton fused:  {triton_us:.1f} μs/call")
-    print(f"  PyTorch:       {pytorch_us:.1f} μs/call")
-    print(f"  Speedup:       {pytorch_us / triton_us:.1f}×")
+    print(f"  Triton (sync):   {triton_sync_us:.1f} μs/call")
+    print(f"  Triton (async):  {triton_async_us:.1f} μs/call")
+    print(f"  PyTorch:         {pytorch_us:.1f} μs/call")
+    print(f"  Speedup (sync):  {pytorch_us / triton_sync_us:.1f}×")
+    print(f"  Speedup (async): {pytorch_us / triton_async_us:.1f}×")
 
 
 # ===========================================================================
