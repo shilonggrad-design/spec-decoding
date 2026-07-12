@@ -28,14 +28,23 @@ invalid tokens.
 
 ## Results
 
-Benchmarked on Qwen3.5-4B / 0.8B (vocab=248,320), 60 trials across 4 configs × 3 schemas × 5 prompts:
+Benchmarked on Qwen3.5-4B / 0.8B (vocab=248,320), validated end-to-end on A100-SXM4:
 
-| Config | Description | Tool-call Acceptance | vs. vLLM |
-|--------|-------------|---------------------|----------|
-| C1 | Free spec (no grammar) | 77% | — |
-| C2 | Verify-only grammar (= vLLM / SGLang) | **52%** | baseline |
-| C3 | Grammar-guided draft (this project) | **78%** | +26% accept |
-| **C4** | **C3 + adaptive K (this project)** | **79%** | **+42% throughput** |
+### Spec Decoding Ablation (real model inference)
+
+| Config | Description | Person Profile | Tool Call | Output Valid JSON? |
+|--------|-------------|----------------|-----------|---------------------|
+| C1 | Free spec (no grammar) | 66.2% accept | 96.6% accept | ❌ No |
+| C3 | Grammar-guided draft | **78.9%** accept | **100%** accept | ✅ Yes |
+| **C4** | **C3 + adaptive K** | **80.0%** accept, **1.7× tps** | **100%** accept, **1 round** | ✅ Yes |
+
+C4 adaptive K trace on person profile:
+```
+density: [0.0000, 0.0015, 0.9885, 0.9885, 0.0015]
+K:       [8,      8,      1,       1,       8    ]
+```
+Low density (JSON key boundary, ~0 valid tokens) → K=8 (speculate aggressively).
+High density (free text, ~99% valid) → K=1 (conserve compute).
 
 ### Triton Fused Logit Processor (validated on A100)
 
