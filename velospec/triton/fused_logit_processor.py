@@ -134,7 +134,7 @@ if _TRITON_AVAILABLE:
         max_vals = tl.load(block_max_val + offsets, mask=in_range, other=float('-inf'))
         max_idxs = tl.load(block_max_idx + offsets, mask=in_range, other=vocab_size)
         valid_cnts = tl.load(
-            block_valid_cnt + offsets, mask=in_range, other=tl.int32(0)
+            block_valid_cnt + offsets, mask=in_range, other=0
         )
 
         # Global max value
